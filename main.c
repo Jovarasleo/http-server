@@ -1,149 +1,167 @@
-#include <stdio.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
 #include <winsock2.h>
-#include <Ws2tcpip.h>
-#include <Windows.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <iphlpapi.h>
 
-#pragma comment(lib, "ws2_32.lib")
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
+#pragma comment(lib, "Ws2_32.lib")
 
-int readConfigFile(const char *filename, int defaultPort) {
-    FILE *file = fopen(filename, "r");
-    if (file == NULL) {
-        printf("Failed to open config file: %s. Using default port: %d\n", filename, defaultPort);
-        return defaultPort;
-    }
+#define BUFLEN 1024
+#define ADDRESS "127.0.0.1"
+#define PORT 8080
 
-    int port;
-    if (fscanf(file, "port=%d", &port) != 1) {
-        printf("Error reading port from config file. Using default port: %d\n", defaultPort);
-        fclose(file);
-        return defaultPort;
-    }
-
-    fclose(file);
-    return port;
-}
-
-void handleClient(SOCKET clientSocket) {
-    FILE *htmlFile = fopen("index.html", "r");
-    if (htmlFile == NULL) {
-        printf("Failed to open HTML file\n");
-        closesocket(clientSocket);
-        return;
-    }
-
-    fseek(htmlFile, 0, SEEK_END);
-    long contentLength = ftell(htmlFile);
-    fseek(htmlFile, 0, SEEK_SET);
-
-    char responseHeader[256];
-    snprintf(responseHeader, sizeof(responseHeader), "HTTP/1.1 200 OK\r\nContent-Length: %ld\r\n\r\n", contentLength);
-
-    // Debugging statement
-    printf("Sending response header:\n%s\n", responseHeader);
-
-    // Send the response header
-    int bytesSent = send(clientSocket, responseHeader, strlen(responseHeader), 0);
-    if (bytesSent == SOCKET_ERROR) {
-        printf("Error sending response header: %d\n", WSAGetLastError());
-        fclose(htmlFile);
-        closesocket(clientSocket);
-        return;
-    }
-
-    char buffer[1024];
-    size_t bytesRead;
-    size_t totalBytesSent = 0;
-
-    // Send the entire HTML content at once
-    while ((bytesRead = fread(buffer, 1, sizeof(buffer), htmlFile)) > 0) {
-        int bytesSent = send(clientSocket, buffer, bytesRead, 0);
-        if (bytesSent == SOCKET_ERROR) {
-            printf("Error sending HTML content: %d\n", WSAGetLastError());
-            fclose(htmlFile);
-            closesocket(clientSocket);
-            return;
-        }
-
-        totalBytesSent += bytesSent;
-    }
-
-    // Debugging statement
-    printf("Total bytes sent: %zu\n", totalBytesSent);
-
-    fclose(htmlFile);
-
-    // Close the client socket after sending the content
-    closesocket(clientSocket);
-
-    // Debugging statement
-    printf("Client socket closed\n");
-}
+void cleanup(SOCKET listener);
+int readFile(const char *filename, char **output);
 
 int main() {
+    printf("hey!\n");
+
+    int res, sendRes;
+    int running;
     WSADATA wsaData;
+    SOCKET listener, client;
+    struct sockaddr_in address, clientAddr;
+    char recvbuf[BUFLEN];
+    char *inputFileContents;
+    int inputFileLength;
 
-    // Initialize Winsock
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        printf("Failed to initialize Winsock\n");
+    //initialization
+
+    res = WSAStartup(MAKEWORD(2, 2), &wsaData);
+
+    if (res) {
+        printf("Startup failed\n");
         return 1;
     }
 
-    // Create a socket
-    SOCKET serverSocket = socket(AF_INET, SOCK_STREAM, 0);
-    if (serverSocket == INVALID_SOCKET) {
-        printf("Failed to create socket\n");
-        WSACleanup();
+    listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listener == INVALID_SOCKET) {
+        printf("Error with construction\n");
+        cleanup(0);
         return 1;
     }
 
-    // Read configuration from file
-    int PORT = readConfigFile("config.txt", 3000);
-
-    // Set up the server address structure
-    struct sockaddr_in serverAddr;
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);  // Listen on localhost
-    serverAddr.sin_port = htons(PORT);  // Listen on port 7000
-
-    // Bind the socket
-    if (bind(serverSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
-        printf("Bind failed with error code: %d\n", WSAGetLastError());
-        closesocket(serverSocket);
-        WSACleanup();
+    //bind server
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = inet_addr(ADDRESS);
+    address.sin_port = htons(PORT);
+    res = bind(listener, (struct sockaddr *)&address, sizeof(address));
+    if (res == SOCKET_ERROR) {
+        printf("Bind failed\n");
+        cleanup(listener);
         return 1;
     }
 
-    // Listen for incoming connections
-    if (listen(serverSocket, SOMAXCONN) == SOCKET_ERROR) {
-        printf("Listen failed with error code: %d\n", WSAGetLastError());
-        closesocket(serverSocket);
-        WSACleanup();
+    res = listen(listener, SOMAXCONN);
+    if (res == SOCKET_ERROR) {
+        printf("Listen failed\n");
+        cleanup(listener);
         return 1;
     }
 
-    printf("Server is listening on localhost:%d",PORT,"\n");
+    // load file
+    inputFileLength = readFile("index.html", &inputFileContents);
+    if(!inputFileLength || !inputFileContents) {
+        printf("Could not read html file\n");
+        cleanup(listener);
+        return 1;
+    }
 
-    // Accept incoming connections and print information
-    while (1) {
-        struct sockaddr_in clientAddr;
-        int clientAddrLen = sizeof(clientAddr);
+    printf("%s\n", inputFileContents);
 
-        SOCKET clientSocket = accept(serverSocket, (struct sockaddr*)&clientAddr, &clientAddrLen);
-        if (clientSocket == INVALID_SOCKET) {
-            printf("Accept failed with error code: %d\n", WSAGetLastError());
-            closesocket(serverSocket);
-            WSACleanup();
+    // done setting up
+    printf("Accepting on %s:%d\n", ADDRESS, PORT);
+    while (running) {
+        // accept client
+        int clientAddrLen;
+        client = accept(listener, NULL, NULL);
+        if(client == INVALID_SOCKET) {
+            printf("Could not accept\n");
+            cleanup(listener);
             return 1;
         }
 
-        // Read and send HTML content
-        handleClient(clientSocket);
+        //get client info
+        getpeername(client, (struct sockaddr *)&clientAddr, &clientAddrLen);
+        printf("Client connect at: %s:%d\n", inet_ntoa(address.sin_addr));
+
+        //receive
+        res = recv(client, recvbuf, BUFLEN, 0);
+        if ( res > 0) {
+            recvbuf[res] = 0;
+            // printf("%s\n", recvbuf);
+
+            // test if  GET request
+
+        if (!memcmp(recvbuf, "GET", 3)) {
+            printf("GET\n");
+            sendRes = send(client, inputFileContents, inputFileLength, 0);
+
+            if(sendRes == SOCKET_ERROR) {
+                printf("Send failed\n");
+            }
+        }
+
+        
+        if (!memcmp(recvbuf, "POST", 4)) {
+            printf("POST\n");
+            
+            if(sendRes == SOCKET_ERROR) {
+                printf("Send failed\n");
+            }
+        }
+
+        } else if (!res) {
+            printf("Client disconnected!\n");
+        } else {
+            printf("Receive failed\n");
+        }
+
+        shutdown(client, SD_BOTH);
+        closesocket(client);
+        client = INVALID_SOCKET;
     }
 
-    // Clean up
-    closesocket(serverSocket);
-    WSACleanup();
+    cleanup(listener);
+    printf("Shutting down.\n");
 
     return 0;
+}
+
+void cleanup(SOCKET listener) {
+    if (listener && listener != INVALID_SOCKET) {
+        closesocket(listener);
+    }
+
+    WSACleanup();
+}
+
+int readFile(const char *filename, char **output) {
+    FILE *fp = fopen(filename, "r");
+    if (!fp) {
+        return 0;
+    }
+
+    // get length
+    // move cursor to the end
+    fseek(fp, 0L, SEEK_END);
+    // get remaining length
+    int len = ftell(fp);
+    // return to original position
+    fseek(fp, 0, SEEK_SET);
+
+    // read
+    *output = malloc(len + 1);
+    fread(*output, len, 1, fp);
+    (*output)[len] = 0;
+    fclose(fp);
+
+    return len;
 }
